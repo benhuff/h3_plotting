@@ -6,10 +6,13 @@ from shapely.geometry import (
     Polygon,
     MultiPolygon,
 )
-from pandas import Series
+from shapely.ops import split, transform
+
 import h3
+import numpy as np
 
 from typing import Union, Literal, get_args
+from pandas import Series
 import warnings
 
 _index_types = Literal["int", "str"]
@@ -30,7 +33,7 @@ def _cover_point(shape: Point, resolution: int, buffer: int = None):
     """
     hexes = set()
 
-    hexes.update([h3.geo_to_h3(shape.x, shape.y, resolution=resolution)])
+    hexes.update([h3.geo_to_h3(shape.y, shape.x, resolution=resolution)])
 
     if buffer:
         buffer_hexes = set()
@@ -62,7 +65,7 @@ def _cover_multipoint(shape: MultiPoint, resolution: int, buffer: int = None):
     hexes = set()
 
     for geom in shape.geoms:
-        hexes.update([h3.geo_to_h3(geom.x, geom.y, resolution=resolution)])
+        hexes.update([h3.geo_to_h3(geom.y, geom.x, resolution=resolution)])
 
     if buffer:
         buffer_hexes = set()
@@ -93,10 +96,10 @@ def _cover_linestring(shape: LineString, resolution: int, buffer: int = None):
     """
     hexes = set()
 
-    endpoint_hexes = [h3.geo_to_h3(t[0], t[1], resolution) for t in list(shape.coords)]
+    endpoint_hexes = [h3.geo_to_h3(t[1], t[0], resolution) for t in list(shape.coords)]
 
     for i in range(len(endpoint_hexes) - 1):
-        hexes.update(h3.h3_line(endpoint_hexes[i + 1], endpoint_hexes[i]))
+        hexes.update(h3.h3_line(endpoint_hexes[i], endpoint_hexes[i + 1]))
 
     if buffer:
         buffer_hexes = set()
@@ -129,11 +132,11 @@ def _cover_multilinestring(shape: MultiLineString, resolution: int, buffer: int 
 
     for geom in shape.geoms:
         endpoint_hexes = [
-            h3.geo_to_h3(t[0], t[1], resolution) for t in list(geom.coords)
+            h3.geo_to_h3(t[1], t[0], resolution) for t in list(geom.coords)
         ]
 
         for i in range(len(endpoint_hexes) - 1):
-            hexes.update(h3.h3_line(endpoint_hexes[i + 1], endpoint_hexes[i]))
+            hexes.update(h3.h3_line(endpoint_hexes[i], endpoint_hexes[i + 1]))
 
     if buffer:
         buffer_hexes = set()
@@ -166,11 +169,11 @@ def _cover_polygon(shape: Polygon, resolution: int, buffer: int = None):
     interiors = set()
 
     exteriors.update(
-        h3.polyfill(Polygon(shape.exterior).__geo_interface__, res=resolution)
+        h3.polyfill(Polygon(shape.exterior).__geo_interface__, res=resolution, geo_json_conformant=True)
     )
     for interior in shape.interiors:
         interiors.update(
-            h3.polyfill(Polygon(interior).__geo_interface__, res=resolution)
+            h3.polyfill(Polygon(interior).__geo_interface__, res=resolution, geo_json_conformant=True)
         )
 
     hexes = exteriors - interiors
@@ -206,10 +209,10 @@ def _cover_multipolygon(shape: MultiPolygon, resolution: int, buffer: int = None
     interiors = set()
 
     for geom in shape.geoms:
-        exteriors.update(h3.polyfill(Polygon(geom).__geo_interface__, res=resolution))
+        exteriors.update(h3.polyfill(Polygon(geom).__geo_interface__, res=resolution, geo_json_conformant=True))
         for interior in geom.interiors:
             interiors.update(
-                h3.polyfill(Polygon(interior).__geo_interface__, res=resolution)
+                h3.polyfill(Polygon(interior).__geo_interface__, res=resolution, geo_json_conformant=True)
             )
 
     hexes = exteriors - interiors
@@ -312,126 +315,6 @@ def cover_shape(
             {type(shape)} was provided.
             """
         )
-
-
-def index_to_polygon(index: Union[list, set, Series, str, int]):
-    """
-    Convert one or more H3 cell indexes into Shapely Polygons representing the geometry of the H3 cell boundary.
-
-    Args:
-        index (Union[list, set, Series, str, int]): One or more H3 cell indexes.
-
-    Raises:
-        Exception: Unsupported index input type.
-
-    Returns:
-        list: list of Shapely Polygon geometries. CRS of returned geometries is EPSG:4326.
-
-    Examples:
-        One use case would be to create a GeoDataFrame from one or more H3 cell indexes:
-        ```
-        >>> index = {'885391a507fffff', '88539c02cdfffff', '88539ccb47fffff'}
-        >>> gdf = gpd.GeoDataFrame(geometry=cover.index_to_point(index), crs='epsg:4326')
-        ```
-
-        Another use case could be to add a geometry column to a DataFrame that has a column with H3 cell indexes:
-        ```
-        >>> df.loc[:,'geometry'] = cover.index_to_point(df['h3_index'])
-        ```
-    """
-    if isinstance(index, list):
-        if isinstance(index[0], int):
-            index = [h3.h3_to_string(i) for i in index]
-        index = index
-
-    elif isinstance(index, set):
-        index = list(index)
-        if isinstance(index[0], int):
-            index = [h3.h3_to_string(i) for i in index]
-        index = index
-
-    elif isinstance(index, Series):
-        index = index.to_list()
-        if isinstance(index[0], int):
-            index = [h3.h3_to_string(i) for i in index]
-        index = index
-
-    elif isinstance(index, str):
-        index = [index]
-
-    elif isinstance(index, int):
-        index = [h3.h3_to_string(index)]
-
-    else:
-        raise Exception(
-            f"""
-            Index is of unknown type! Currently supported types:
-            List, Set, Series, String, Integer.
-            {type(index)} was provided.
-            """
-        )
-
-    return [Polygon(h3.h3_to_geo_boundary(i)) for i in index]
-
-
-def index_to_point(index: Union[list, set, Series, str, int]):
-    """
-    Convert one or more H3 cell indexes into Shapely Points representing the centroid of the H3 cell boundary.
-
-    Args:
-        index (Union[list, set, Series, str, int]): One or more H3 cell indexes.
-
-    Raises:
-        Exception: Unsupported index input type.
-
-    Returns:
-        list: list of Shapely Point geometries. CRS of returned geometries is EPSG:4326.
-
-    Examples:
-        One use case would be to create a GeoDataFrame from one or more H3 cell indexes:
-        ```
-        >>> index = {'885391a507fffff', '88539c02cdfffff', '88539ccb47fffff'}
-        >>> gdf = gpd.GeoDataFrame(geometry=cover.index_to_point(index), crs='epsg:4326')
-        ```
-
-        Another use case could be to add a geometry column to a DataFrame that has a column with H3 cell indexes:
-        ```
-        >>> df.loc[:,'geometry'] = cover.index_to_point(df['h3_index'])
-        ```
-    """
-    if isinstance(index, list):
-        if isinstance(index[0], int):
-            index = [h3.h3_to_string(i) for i in index]
-        index = index
-
-    elif isinstance(index, set):
-        index = list(index)
-        if isinstance(index[0], int):
-            index = [h3.h3_to_string(i) for i in index]
-        index = index
-
-    elif isinstance(index, Series):
-        index = index.to_list()
-        if isinstance(index[0], int):
-            index = [h3.h3_to_string(i) for i in index]
-        index = index
-
-    elif isinstance(index, str):
-        index = [index]
-
-    elif isinstance(index, int):
-        index = [h3.h3_to_string(index)]
-
-    else:
-        raise Exception(
-            f"""
-            Index is of unknown type! Currently supported types:
-            List, Set, Series, String, Integer.
-            {type(index)} was provided.
-            """
-        )
-
-    return [Point(h3.h3_to_geo(i)) for i in index]
 
 
 def _cover_polygon_exact(
@@ -622,4 +505,164 @@ def cover_shape_exact(
             {type(shape)} was provided.
             """
         )
-        
+
+
+def antimeridian_handler(shape: Polygon):
+    """
+    Cut a Shapely Polygon that cross the antimeridian ((180, 90), (180, -90)) into a MultiPolygon for visualizing in WGS84.
+    If the given Polygon does not cross the
+
+    Args:
+        shape (Polygon): Shapely Polygon.
+
+    Returns:
+        Polygon or MultiPolygon: Shapely Polygon or MultiPolygon.
+    """
+    x = np.array(shape.exterior.coords.xy[0])
+    y = np.array(shape.exterior.coords.xy[1])
+
+    idxs_neg = np.where(x < 0)
+    x[idxs_neg] += 360
+
+    extended = Polygon(np.array(list(zip(x, y))))
+    am = LineString(((180, 90), (180, -90)))
+
+    if extended.intersects(am):
+        return MultiPolygon(split(extended, am))
+    else:
+        return shape
+
+
+def index_to_polygon(
+    index: Union[list, set, Series, str, int], antimeridian_cutting: bool = False
+):
+    """
+    Convert one or more H3 cell indexes into Shapely Polygons representing the geometry of the H3 cell boundary.
+
+    Args:
+        index (Union[list, set, Series, str, int]): One or more H3 cell indexes.
+
+    Raises:
+        Exception: Unsupported index input type.
+
+    Returns:
+        list: list of Shapely Polygon geometries. CRS of returned geometries is EPSG:4326.
+
+    Examples:
+        One use case would be to create a GeoDataFrame from one or more H3 cell indexes:
+        ```
+        >>> index = {'885391a507fffff', '88539c02cdfffff', '88539ccb47fffff'}
+        >>> gdf = gpd.GeoDataFrame(geometry=cover.index_to_point(index), crs='epsg:4326')
+        ```
+
+        Another use case could be to add a geometry column to a DataFrame that has a column with H3 cell indexes:
+        ```
+        >>> df.loc[:,'geometry'] = cover.index_to_point(df['h3_index'])
+        ```
+    """
+    if isinstance(index, list):
+        if isinstance(index[0], int):
+            index = [h3.h3_to_string(i) for i in index]
+        index = index
+
+    elif isinstance(index, set):
+        index = list(index)
+        if isinstance(index[0], int):
+            index = [h3.h3_to_string(i) for i in index]
+        index = index
+
+    elif isinstance(index, Series):
+        index = index.to_list()
+        if isinstance(index[0], int):
+            index = [h3.h3_to_string(i) for i in index]
+        index = index
+
+    elif isinstance(index, str):
+        index = [index]
+
+    elif isinstance(index, int):
+        index = [h3.h3_to_string(index)]
+
+    else:
+        raise Exception(
+            f"""
+            Index is of unknown type! Currently supported types:
+            List, Set, Series, String, Integer.
+            {type(index)} was provided.
+            """
+        )
+
+    if antimeridian_cutting:
+        polygons = [
+            antimeridian_handler(Polygon(h3.h3_to_geo_boundary(i, geo_json=True))) for i in index
+        ]
+
+    else:
+        polygons = [Polygon(h3.h3_to_geo_boundary(i, geo_json=True)) for i in index]
+
+    return polygons
+
+
+def flip(x, y):
+    "Swap x, y order."
+    return y, x
+
+
+def index_to_point(index: Union[list, set, Series, str, int]):
+    """
+    Convert one or more H3 cell indexes into Shapely Points representing the centroid of the H3 cell boundary.
+
+    Args:
+        index (Union[list, set, Series, str, int]): One or more H3 cell indexes.
+
+    Raises:
+        Exception: Unsupported index input type.
+
+    Returns:
+        list: list of Shapely Point geometries. CRS of returned geometries is EPSG:4326.
+
+    Examples:
+        One use case would be to create a GeoDataFrame from one or more H3 cell indexes:
+        ```
+        >>> index = {'885391a507fffff', '88539c02cdfffff', '88539ccb47fffff'}
+        >>> gdf = gpd.GeoDataFrame(geometry=cover.index_to_point(index), crs='epsg:4326')
+        ```
+
+        Another use case could be to add a geometry column to a DataFrame that has a column with H3 cell indexes:
+        ```
+        >>> df.loc[:,'geometry'] = cover.index_to_point(df['h3_index'])
+        ```
+    """
+    if isinstance(index, list):
+        if isinstance(index[0], int):
+            index = [h3.h3_to_string(i) for i in index]
+        index = index
+
+    elif isinstance(index, set):
+        index = list(index)
+        if isinstance(index[0], int):
+            index = [h3.h3_to_string(i) for i in index]
+        index = index
+
+    elif isinstance(index, Series):
+        index = index.to_list()
+        if isinstance(index[0], int):
+            index = [h3.h3_to_string(i) for i in index]
+        index = index
+
+    elif isinstance(index, str):
+        index = [index]
+
+    elif isinstance(index, int):
+        index = [h3.h3_to_string(index)]
+
+    else:
+        raise Exception(
+            f"""
+            Index is of unknown type! Currently supported types:
+            List, Set, Series, String, Integer.
+            {type(index)} was provided.
+            """
+        )
+
+    return [transform(flip, Point(h3.h3_to_geo(i))) for i in index]
